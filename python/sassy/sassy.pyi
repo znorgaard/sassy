@@ -159,6 +159,7 @@ class Searcher:
         text: bytes,
         k: int,
         margin: int = 0,
+        max_gaps: int | None = None,
     ) -> list[AllAlignmentsAtPosIter]:
         """
         Search for all end positions with score <= k, returning a lazy iterator
@@ -177,6 +178,8 @@ class Searcher:
             k: Maximum edit distance (number of allowed errors).
             margin: Also yield alignments with cost <= optimal_cost + margin.
                     Clamped to k. Default 0 (optimal alignments only).
+            max_gaps: Maximum number of gap bases (insertions + deletions) allowed
+                      per alignment. None means no limit.
 
         Returns:
             A list of AllAlignmentsAtPosIter objects (one per matched end position).

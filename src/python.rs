@@ -143,24 +143,27 @@ impl Searcher {
         }
     }
 
-    #[pyo3(signature = (pattern, text, k, margin=0))]
-    #[doc = "Search for all end positions with score <= k, returning a lazy iterator per end position. Each iterator yields alignments with cost <= optimal_cost + margin. Break early from the lazy iterator(s) to avoid exponential enumeration."]
+    #[pyo3(signature = (pattern, text, k, margin=0, max_gaps=None))]
+    #[doc = "Search for all end positions with score <= k, returning a lazy iterator per end position. Each iterator yields alignments with cost <= optimal_cost + margin. Break early from the lazy iterator(s) to avoid exponential enumeration. max_gaps limits the total number of gap bases (insertions + deletions) in any alignment."]
     fn search_all_alignments(
         &mut self,
         pattern: &Bound<'_, PyBytes>,
         text: &Bound<'_, PyBytes>,
         k: usize,
         margin: usize,
+        max_gaps: Option<usize>,
     ) -> Vec<PyAllAlignmentsAtPosIter> {
         let pattern = pattern.as_bytes();
         let text = text.as_bytes();
         let groups = match &mut self.searcher {
             SearcherType::Ascii(searcher) => {
-                searcher.search_all_alignments(pattern, text, k, margin)
+                searcher.search_all_alignments(pattern, text, k, margin, max_gaps)
             }
-            SearcherType::Dna(searcher) => searcher.search_all_alignments(pattern, text, k, margin),
+            SearcherType::Dna(searcher) => {
+                searcher.search_all_alignments(pattern, text, k, margin, max_gaps)
+            }
             SearcherType::Iupac(searcher) => {
-                searcher.search_all_alignments(pattern, text, k, margin)
+                searcher.search_all_alignments(pattern, text, k, margin, max_gaps)
             }
         };
         groups

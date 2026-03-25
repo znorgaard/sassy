@@ -119,6 +119,9 @@ struct TraceFrame {
     /// single length value suffices because the shared vec grows monotonically
     /// within a subtree and is only shortened on backtrack.
     cigar_len_at_entry: usize,
+    /// Number of gap bases (Ins + Del operations) on the path from the root
+    /// frame to this frame. Used to enforce `max_gaps`.
+    gaps: usize,
 }
 
 /// Lazy iterator over all valid alignments (CIGARs / start positions) for a
@@ -149,6 +152,9 @@ pub struct AllAlignmentsAtPos {
     pattern_end: usize,
     /// `Some(fwd_len)` for RC alignments: used to flip coordinates when building a match.
     fwd_text_len: Option<usize>,
+    /// Maximum number of gap bases (Ins + Del) allowed in any single alignment.
+    /// `None` means no limit.
+    max_gaps: Option<usize>,
     stack: Vec<TraceFrame>,
     cigar_ops: Vec<CigarOp>,
 }
@@ -168,7 +174,14 @@ impl AllAlignmentsAtPos {
     /// Push a child frame onto the DFS stack for the given transition.
     /// Appends `op` to the shared cigar buffer first, then records the
     /// resulting buffer length as the frame's rollback point.
-    fn push_child_frame(&mut self, i: usize, j: usize, edit_budget: Cost, op: CigarOp) {
+    fn push_child_frame(
+        &mut self,
+        i: usize,
+        j: usize,
+        edit_budget: Cost,
+        op: CigarOp,
+        gaps: usize,
+    ) {
         self.cigar_ops.push(op);
         self.stack.push(TraceFrame {
             i,
@@ -176,6 +189,7 @@ impl AllAlignmentsAtPos {
             edit_budget,
             next_op: Some(TraceOp::Match),
             cigar_len_at_entry: self.cigar_ops.len(),
+            gaps,
         });
     }
 
@@ -266,7 +280,11 @@ impl Iterator for AllAlignmentsAtPos {
             // subsequent op even if this one is invalid.
             frame.next_op = op.next();
 
-            let (i, j, edit_budget) = (frame.i, frame.j, frame.edit_budget);
+            let (i, j, edit_budget, gaps) =
+                (frame.i, frame.j, frame.edit_budget, frame.gaps);
+
+            // Whether the gap limit has been reached.
+            let gaps_exhausted = self.max_gaps.is_some_and(|g| gaps >= g);
 
             // ── Check validity and push child frame ──────────────────────────
             //
@@ -284,7 +302,7 @@ impl Iterator for AllAlignmentsAtPos {
                         && self.matrix.get(i - 1, j - 1) <= edit_budget
                         && self.chars_match(i - 1, j - 1)
                     {
-                        self.push_child_frame(i - 1, j - 1, edit_budget, CigarOp::Match);
+                        self.push_child_frame(i - 1, j - 1, edit_budget, CigarOp::Match, gaps);
                     }
                 }
                 TraceOp::Sub => {
@@ -298,17 +316,25 @@ impl Iterator for AllAlignmentsAtPos {
                         && self.matrix.get(i - 1, j - 1) < edit_budget
                         && !self.chars_match(i - 1, j - 1)
                     {
-                        self.push_child_frame(i - 1, j - 1, edit_budget - 1, CigarOp::Sub);
+                        self.push_child_frame(i - 1, j - 1, edit_budget - 1, CigarOp::Sub, gaps);
                     }
                 }
                 TraceOp::Del => {
-                    if i > 0 && edit_budget >= 1 && self.matrix.get(i - 1, j) < edit_budget {
-                        self.push_child_frame(i - 1, j, edit_budget - 1, CigarOp::Del);
+                    if !gaps_exhausted
+                        && i > 0
+                        && edit_budget >= 1
+                        && self.matrix.get(i - 1, j) < edit_budget
+                    {
+                        self.push_child_frame(i - 1, j, edit_budget - 1, CigarOp::Del, gaps + 1);
                     }
                 }
                 TraceOp::Ins => {
-                    if j > 0 && edit_budget >= 1 && self.matrix.get(i, j - 1) < edit_budget {
-                        self.push_child_frame(i, j - 1, edit_budget - 1, CigarOp::Ins);
+                    if !gaps_exhausted
+                        && j > 0
+                        && edit_budget >= 1
+                        && self.matrix.get(i, j - 1) < edit_budget
+                    {
+                        self.push_child_frame(i, j - 1, edit_budget - 1, CigarOp::Ins, gaps + 1);
                     }
                 }
             }
@@ -349,6 +375,7 @@ pub fn all_alignments_at_position<P: Profile>(
     strand: Strand,
     fwd_text_len: Option<usize>,
     margin: Cost,
+    max_gaps: Option<usize>,
 ) -> AllAlignmentsAtPos {
     let fill_len = pattern.len() + k as usize;
     let mut matrix = CostMatrix::default();
@@ -386,6 +413,7 @@ pub fn all_alignments_at_position<P: Profile>(
         edit_budget: total_budget,
         next_op: Some(TraceOp::Match),
         cigar_len_at_entry: 0,
+        gaps: 0,
     };
 
     // NB: There are two optimizations that may be worth considering in the
@@ -411,6 +439,7 @@ pub fn all_alignments_at_position<P: Profile>(
         max_cost: total_budget,
         pattern_end,
         fwd_text_len,
+        max_gaps,
         stack: vec![init_frame],
         cigar_ops: Vec::new(),
     }
@@ -791,6 +820,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -820,6 +850,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -850,6 +881,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
         );
         let mut all: Vec<_> = group.collect();
         // Sort by text_start for deterministic comparison.
@@ -895,6 +927,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -935,6 +968,7 @@ mod tests {
             Strand::Fwd,
             None,
             1,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -983,6 +1017,7 @@ mod tests {
             Strand::Fwd,
             None,
             99,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -1018,6 +1053,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
         );
 
         let m = group.next().expect("expected an alignment");
@@ -1046,8 +1082,125 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
         );
         assert_eq!(group.optimal_cost(), 0);
+    }
+
+    #[test]
+    fn test_max_gaps_zero_excludes_all_indels() {
+        // "AT" vs "ACT" at k=1 yields 3 alignments without gap limit:
+        //   1X1= (sub, 0 gaps), 1=1D1= (1 gap), 1I1= (1 gap)
+        // With max_gaps=0, only the substitution alignment should remain.
+        let pattern = b"AT".as_slice();
+        let text = b"ACT".as_slice();
+
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            Some(0),
+        );
+        let all: Vec<_> = group.collect();
+
+        assert_eq!(all.len(), 1, "expected only the substitution alignment");
+        assert_eq!(all[0].cigar.to_string(), "1X1=");
+    }
+
+    #[test]
+    fn test_max_gaps_one_allows_single_gap() {
+        // "AT" vs "ACT" at k=1. All 3 alignments have at most 1 gap base.
+        let pattern = b"AT".as_slice();
+        let text = b"ACT".as_slice();
+
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            Some(1),
+        );
+        let all: Vec<_> = group.collect();
+
+        assert_eq!(all.len(), 3, "all 3 cost-1 alignments have ≤1 gap base");
+    }
+
+    #[test]
+    fn test_max_gaps_with_margin() {
+        // "AT" vs "ACT", k=2, margin=1 yields 7 alignments without gap limit.
+        // With max_gaps=0: only substitution-only alignments survive.
+        // Cost-1: 1X1= (0 gaps). Cost-2: none without gaps (all cost-2 paths
+        // use at least one gap operation).
+        let pattern = b"AT".as_slice();
+        let text = b"ACT".as_slice();
+
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            2,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            1,
+            Some(0),
+        );
+        let all: Vec<_> = group.collect();
+
+        assert_eq!(all.len(), 1, "only 1X1= survives with max_gaps=0");
+        assert_eq!(all[0].cigar.to_string(), "1X1=");
+    }
+
+    #[test]
+    fn test_max_gaps_none_matches_unrestricted() {
+        // Verify that max_gaps=None gives the same results as no restriction.
+        let pattern = b"AT".as_slice();
+        let text = b"ACT".as_slice();
+
+        let unrestricted = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            2,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            1,
+            None,
+        );
+        let large_limit = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            2,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            1,
+            Some(usize::MAX),
+        );
+        let a: Vec<_> = unrestricted.collect();
+        let b: Vec<_> = large_limit.collect();
+        assert_eq!(a.len(), b.len());
     }
 
     #[test]

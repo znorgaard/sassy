@@ -160,6 +160,7 @@ class Searcher:
         k: int,
         margin: int = 0,
         max_gaps: int | None = None,
+        max_contiguous_n: int | None = None,
     ) -> list[AllAlignmentsAtPosIter]:
         """
         Search for all end positions with score <= k, returning a lazy iterator
@@ -180,6 +181,9 @@ class Searcher:
                     Clamped to k. Default 0 (optimal alignments only).
             max_gaps: Maximum number of gap bases (insertions + deletions) allowed
                       per alignment. None means no limit.
+            max_contiguous_n: Maximum length of a contiguous run of N bases (case-insensitive)
+                              allowed in any alignment path. Branches exceeding this limit are
+                              pruned during DFS traversal. None means no limit.
 
         Returns:
             A list of AllAlignmentsAtPosIter objects (one per matched end position).

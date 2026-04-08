@@ -262,6 +262,18 @@ impl Iterator for AllAlignmentsAtPos {
                 }
                 Some(op) => op,
             };
+
+            // Disallow trailing deletions. Note that leading deletions are never
+            // returned since the DFS exits when all pattern chars are consumed.
+            // TODO: This can cause `AllAlignmentsAtPos` to yield zero items at
+            // end positions whose only valid alignment was a trailing deletion.
+            // `create_alignment_groups` should either peek-and-skip empty groups
+            // or the search phase should avoid reporting such end positions.
+            if frame.j == self.pattern_end && matches!(op, TraceOp::Del) {
+                frame.next_op = op.next();
+                continue;
+            }
+
             // Advance before validity check so the next iteration tries the
             // subsequent op even if this one is invalid.
             frame.next_op = op.next();
@@ -914,6 +926,32 @@ mod tests {
     }
 
     #[test]
+    fn test_no_trailing_or_leading_deletions() {
+        let text = b"AAAG".as_slice();
+        let pattern = b"AAA".as_slice();
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+        );
+
+        let all: Vec<_> = group.collect();
+        // The trailing deletion "3=1D" (cost 1) is blocked. The substitution
+        // alignment "2=1X" (text[1:4]="AAG" vs "AAA", cost 1) is valid.
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].text_start, 1);
+        assert_eq!(all[0].cost, 1);
+        assert_eq!(all[0].cigar.to_string(), "2=1X");
+    }
+
+    #[test]
     fn test_margin_one_yields_suboptimal() {
         // "AT" vs "ACT", k=2, margin=1.
         // Optimal cost is 1; budget = min(1+1, 2) = 2.
@@ -941,7 +979,8 @@ mod tests {
         // The DFS interleaves cost-1 and cost-2 results as branches open up;
         // they are not grouped by cost. Order mirrors the Match→Sub→Del→Ins
         // traversal and the extra branches the larger budget unlocks.
-        assert_eq!(all.len(), 7);
+        // The trailing deletion "1=1X1D" (cost 2, start=0) is blocked.
+        assert_eq!(all.len(), 6);
         assert_eq!(all[0].text_start, 1);
         assert_eq!(all[0].cost, 1);
         assert_eq!(all[0].cigar.to_string(), "1X1=");
@@ -954,15 +993,12 @@ mod tests {
         assert_eq!(all[3].text_start, 2);
         assert_eq!(all[3].cost, 1);
         assert_eq!(all[3].cigar.to_string(), "1I1=");
-        assert_eq!(all[4].text_start, 0);
+        assert_eq!(all[4].text_start, 2);
         assert_eq!(all[4].cost, 2);
-        assert_eq!(all[4].cigar.to_string(), "1=1X1D");
-        assert_eq!(all[5].text_start, 2);
+        assert_eq!(all[4].cigar.to_string(), "1X1I");
+        assert_eq!(all[5].text_start, 3);
         assert_eq!(all[5].cost, 2);
-        assert_eq!(all[5].cigar.to_string(), "1X1I");
-        assert_eq!(all[6].text_start, 3);
-        assert_eq!(all[6].cost, 2);
-        assert_eq!(all[6].cigar.to_string(), "2I");
+        assert_eq!(all[5].cigar.to_string(), "2I");
     }
 
     #[test]

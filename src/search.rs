@@ -717,6 +717,7 @@ impl<P: Profile> Searcher<P> {
         fwd_text_len: Option<usize>,
         margin: Cost,
         max_gaps: Option<usize>,
+        max_contiguous_n: Option<usize>,
     ) -> Vec<AllAlignmentsAtPos> {
         let fill_len = pattern.len() + k as usize;
         let mut groups = Vec::new();
@@ -736,6 +737,7 @@ impl<P: Profile> Searcher<P> {
                     fwd_text_len,
                     margin,
                     max_gaps,
+                    max_contiguous_n,
                 ));
             }
         }
@@ -752,6 +754,7 @@ impl<P: Profile> Searcher<P> {
         fwd_text_len: Option<usize>,
         margin: Cost,
         max_gaps: Option<usize>,
+        max_contiguous_n: Option<usize>,
     ) -> Vec<AllAlignmentsAtPos> {
         self.search_positions_bounded(
             MultiPattern::one(pattern),
@@ -759,7 +762,16 @@ impl<P: Profile> Searcher<P> {
             k as Cost,
             true,
         );
-        self.create_alignment_groups(pattern, text, k as Cost, strand, fwd_text_len, margin, max_gaps)
+        self.create_alignment_groups(
+            pattern,
+            text,
+            k as Cost,
+            strand,
+            fwd_text_len,
+            margin,
+            max_gaps,
+            max_contiguous_n,
+        )
     }
 
     /// Search for *all* end positions with score <= k, returning a lazy
@@ -785,6 +797,7 @@ impl<P: Profile> Searcher<P> {
         k: usize,
         margin: usize,
         max_gaps: Option<usize>,
+        max_contiguous_n: Option<usize>,
     ) -> Vec<AllAlignmentsAtPos> {
         let fwd_text = input.text();
         let fwd_text_ref = fwd_text.as_ref();
@@ -799,6 +812,7 @@ impl<P: Profile> Searcher<P> {
             None,
             margin,
             max_gaps,
+            max_contiguous_n,
         );
 
         if self.rc {
@@ -813,6 +827,7 @@ impl<P: Profile> Searcher<P> {
                 Some(fwd_len),
                 margin,
                 max_gaps,
+                max_contiguous_n,
             );
             groups.append(&mut rc_groups);
         }
@@ -3194,7 +3209,7 @@ mod tests {
         k: usize,
     ) {
         let all_matches = searcher.search_all(pattern, text, k);
-        let mut groups = searcher.search_all_alignments(pattern, text, k, 0, None);
+        let mut groups = searcher.search_all_alignments(pattern, text, k, 0, None, None);
 
         assert_eq!(
             groups.len(),
@@ -3293,7 +3308,7 @@ mod tests {
         let text = b"ACT";
         let mut s = Searcher::<Dna>::new_fwd();
 
-        let mut groups = s.search_all_alignments(pattern, text, 1, 0, None);
+        let mut groups = s.search_all_alignments(pattern, text, 1, 0, None, None);
 
         // Collect and sort each group by (text_start, cigar) for deterministic comparison.
         let collected: Vec<Vec<(usize, usize, i32, String)>> = groups

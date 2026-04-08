@@ -122,6 +122,9 @@ struct TraceFrame {
     /// Number of gap bases (Ins + Del operations) on the path from the root
     /// frame to this frame. Used to enforce `max_gaps`.
     gaps: usize,
+    /// Length of the contiguous N-run at the current text position on the path
+    /// from the root frame to this frame. Used to enforce `max_contiguous_n`.
+    n_run: usize,
 }
 
 /// Lazy iterator over all valid alignments (CIGARs / start positions) for a
@@ -155,6 +158,9 @@ pub struct AllAlignmentsAtPos {
     /// Maximum number of gap bases (Ins + Del) allowed in any single alignment.
     /// `None` means no limit.
     max_gaps: Option<usize>,
+    /// Maximum contiguous run of N bases (case-insensitive) allowed in any
+    /// single alignment's text slice. `None` means no limit.
+    max_contiguous_n: Option<usize>,
     stack: Vec<TraceFrame>,
     cigar_ops: Vec<CigarOp>,
 }
@@ -181,6 +187,7 @@ impl AllAlignmentsAtPos {
         edit_budget: Cost,
         op: CigarOp,
         gaps: usize,
+        n_run: usize,
     ) {
         self.cigar_ops.push(op);
         self.stack.push(TraceFrame {
@@ -190,6 +197,7 @@ impl AllAlignmentsAtPos {
             next_op: Some(TraceOp::Match),
             cigar_len_at_entry: self.cigar_ops.len(),
             gaps,
+            n_run,
         });
     }
 
@@ -280,8 +288,8 @@ impl Iterator for AllAlignmentsAtPos {
             // subsequent op even if this one is invalid.
             frame.next_op = op.next();
 
-            let (i, j, edit_budget, gaps) =
-                (frame.i, frame.j, frame.edit_budget, frame.gaps);
+            let (i, j, edit_budget, gaps, n_run) =
+                (frame.i, frame.j, frame.edit_budget, frame.gaps, frame.n_run);
 
             // Whether the gap limit has been reached.
             let gaps_exhausted = self.max_gaps.is_some_and(|g| gaps >= g);
@@ -302,7 +310,13 @@ impl Iterator for AllAlignmentsAtPos {
                         && self.matrix.get(i - 1, j - 1) <= edit_budget
                         && self.chars_match(i - 1, j - 1)
                     {
-                        self.push_child_frame(i - 1, j - 1, edit_budget, CigarOp::Match, gaps);
+                        let new_n_run =
+                            if (self.text[i - 1] & 0xDF) == b'N' { n_run + 1 } else { 0 };
+                        if !self.max_contiguous_n.is_some_and(|g| new_n_run > g) {
+                            self.push_child_frame(
+                                i - 1, j - 1, edit_budget, CigarOp::Match, gaps, new_n_run,
+                            );
+                        }
                     }
                 }
                 TraceOp::Sub => {
@@ -316,7 +330,13 @@ impl Iterator for AllAlignmentsAtPos {
                         && self.matrix.get(i - 1, j - 1) < edit_budget
                         && !self.chars_match(i - 1, j - 1)
                     {
-                        self.push_child_frame(i - 1, j - 1, edit_budget - 1, CigarOp::Sub, gaps);
+                        let new_n_run =
+                            if (self.text[i - 1] & 0xDF) == b'N' { n_run + 1 } else { 0 };
+                        if !self.max_contiguous_n.is_some_and(|g| new_n_run > g) {
+                            self.push_child_frame(
+                                i - 1, j - 1, edit_budget - 1, CigarOp::Sub, gaps, new_n_run,
+                            );
+                        }
                     }
                 }
                 TraceOp::Del => {
@@ -325,7 +345,13 @@ impl Iterator for AllAlignmentsAtPos {
                         && edit_budget >= 1
                         && self.matrix.get(i - 1, j) < edit_budget
                     {
-                        self.push_child_frame(i - 1, j, edit_budget - 1, CigarOp::Del, gaps + 1);
+                        let new_n_run =
+                            if (self.text[i - 1] & 0xDF) == b'N' { n_run + 1 } else { 0 };
+                        if !self.max_contiguous_n.is_some_and(|g| new_n_run > g) {
+                            self.push_child_frame(
+                                i - 1, j, edit_budget - 1, CigarOp::Del, gaps + 1, new_n_run,
+                            );
+                        }
                     }
                 }
                 TraceOp::Ins => {
@@ -334,7 +360,10 @@ impl Iterator for AllAlignmentsAtPos {
                         && edit_budget >= 1
                         && self.matrix.get(i, j - 1) < edit_budget
                     {
-                        self.push_child_frame(i, j - 1, edit_budget - 1, CigarOp::Ins, gaps + 1);
+                        // Ins does not consume a text character; the N-run is unchanged.
+                        self.push_child_frame(
+                            i, j - 1, edit_budget - 1, CigarOp::Ins, gaps + 1, n_run,
+                        );
                     }
                 }
             }
@@ -376,6 +405,7 @@ pub fn all_alignments_at_position<P: Profile>(
     fwd_text_len: Option<usize>,
     margin: Cost,
     max_gaps: Option<usize>,
+    max_contiguous_n: Option<usize>,
 ) -> AllAlignmentsAtPos {
     let fill_len = pattern.len() + k as usize;
     let mut matrix = CostMatrix::default();
@@ -414,6 +444,7 @@ pub fn all_alignments_at_position<P: Profile>(
         next_op: Some(TraceOp::Match),
         cigar_len_at_entry: 0,
         gaps: 0,
+        n_run: 0,
     };
 
     // NB: There are two optimizations that may be worth considering in the
@@ -440,6 +471,7 @@ pub fn all_alignments_at_position<P: Profile>(
         pattern_end,
         fwd_text_len,
         max_gaps,
+        max_contiguous_n,
         stack: vec![init_frame],
         cigar_ops: Vec::new(),
     }
@@ -821,6 +853,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -850,6 +883,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
             None,
         );
         let all: Vec<_> = group.collect();
@@ -881,6 +915,7 @@ mod tests {
             Strand::Fwd,
             None,
             0,
+            None,
             None,
         );
         let mut all: Vec<_> = group.collect();
@@ -928,6 +963,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -968,6 +1004,7 @@ mod tests {
             Strand::Fwd,
             None,
             1,
+            None,
             None,
         );
         let all: Vec<_> = group.collect();
@@ -1018,6 +1055,7 @@ mod tests {
             None,
             99,
             None,
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -1054,6 +1092,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
 
         let m = group.next().expect("expected an alignment");
@@ -1083,6 +1122,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         assert_eq!(group.optimal_cost(), 0);
     }
@@ -1107,6 +1147,7 @@ mod tests {
             None,
             0,
             Some(0),
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -1132,6 +1173,7 @@ mod tests {
             None,
             0,
             Some(1),
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -1159,6 +1201,7 @@ mod tests {
             None,
             1,
             Some(0),
+            None,
         );
         let all: Vec<_> = group.collect();
 
@@ -1184,6 +1227,7 @@ mod tests {
             None,
             1,
             None,
+            None,
         );
         let large_limit = all_alignments_at_position::<Dna>(
             pattern,
@@ -1196,6 +1240,128 @@ mod tests {
             Strand::Fwd,
             None,
             1,
+            Some(usize::MAX),
+            None,
+        );
+        let a: Vec<_> = unrestricted.collect();
+        let b: Vec<_> = large_limit.collect();
+        assert_eq!(a.len(), b.len());
+    }
+
+    #[test]
+    fn test_max_contiguous_n_zero_excludes_n_paths() {
+        // "AT" vs "ANT" at k=1:
+        //   Sub : text[1:3]="NT" — consumes N → n_run hits 1 > 0, pruned
+        //   Del : text[0:3]="ANT" — consumes N → n_run hits 1 > 0, pruned
+        //   Ins : text[2:3]="T"  — no text N consumed → n_run stays 0, kept
+        // With max_contiguous_n=0: only the Ins alignment (1I1=) survives.
+        let pattern = b"AT".as_slice();
+        let text = b"ANT".as_slice();
+
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            None,
+            Some(0),
+        );
+        let all: Vec<_> = group.collect();
+
+        assert_eq!(all.len(), 1, "only the Ins alignment survives with max_contiguous_n=0");
+        assert_eq!(all[0].cigar.to_string(), "1I1=");
+    }
+
+    #[test]
+    fn test_max_contiguous_n_one_allows_single_n() {
+        // "AT" vs "ANT" at k=1. All 3 alignments traverse at most 1 consecutive N.
+        // With max_contiguous_n=1: all three alignments survive.
+        let pattern = b"AT".as_slice();
+        let text = b"ANT".as_slice();
+
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            None,
+            Some(1),
+        );
+        let all: Vec<_> = group.collect();
+
+        assert_eq!(all.len(), 3, "all 3 cost-1 alignments have ≤1 consecutive N");
+    }
+
+    #[test]
+    fn test_max_contiguous_n_long_run_pruned() {
+        // "AAA" vs "ANNNA" at k=1. The NNN run is length 3.
+        // With max_contiguous_n=2: all paths through NNN are pruned.
+        let pattern = b"AAA".as_slice();
+        let text = b"ANNNA".as_slice();
+
+        let group = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            None,
+            Some(2),
+        );
+        let all: Vec<_> = group.collect();
+
+        assert_eq!(all.len(), 0, "all alignments traverse the NNN run and are pruned");
+    }
+
+    #[test]
+    fn test_max_contiguous_n_none_matches_unrestricted() {
+        // Verify that max_contiguous_n=None gives the same results as no restriction.
+        let pattern = b"AT".as_slice();
+        let text = b"ANT".as_slice();
+
+        let unrestricted = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            None,
+            None,
+        );
+        let large_limit = all_alignments_at_position::<Dna>(
+            pattern,
+            text,
+            0,
+            text.len(),
+            1,
+            None,
+            None,
+            Strand::Fwd,
+            None,
+            0,
+            None,
             Some(usize::MAX),
         );
         let a: Vec<_> = unrestricted.collect();
